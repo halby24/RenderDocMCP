@@ -1,5 +1,7 @@
 # RenderDoc MCP Server
 
+**[日本語]** | [English](README.en.md)
+
 RenderDoc UI拡張機能として動作するMCPサーバー。AIアシスタントがRenderDocのキャプチャデータにアクセスし、グラフィックスデバッグを支援する。
 
 ## アーキテクチャ
