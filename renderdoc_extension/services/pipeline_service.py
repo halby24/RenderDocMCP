@@ -67,6 +67,125 @@ class PipelineService:
             raise ValueError(result["error"])
         return result["shader"]
 
+    def export_shader_source(self, event_id, stage, target_name=None):
+        """Export shader source code for offline compilation.
+
+        Attempts to get GLSL source code through multiple strategies:
+        1. Check ShaderReflection.debugInfo.files for embedded source (e.g. from SPIR-V debug info)
+        2. Look for a GLSL/source disassembly target
+        3. Fall back to the default disassembly target
+
+        Args:
+            event_id: The event ID to get shader source at
+            stage: Shader stage name
+            target_name: Optional specific disassembly target name to use.
+                         If None, auto-selects the best target for compilation.
+
+        Returns:
+            Dict with shader source, selected target, and all available targets.
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"data": None, "error": None}
+
+        def callback(controller):
+            controller.SetFrameEvent(event_id, True)
+
+            pipe = controller.GetPipelineState()
+            stage_enum = Parsers.parse_stage(stage)
+
+            shader = pipe.GetShader(stage_enum)
+            if shader == rd.ResourceId.Null():
+                result["error"] = "No %s shader bound" % stage
+                return
+
+            reflection = pipe.GetShaderReflection(stage_enum)
+            entry = pipe.GetShaderEntryPoint(stage_enum)
+            pipeline_obj = pipe.GetGraphicsPipelineObject()
+
+            targets = controller.GetDisassemblyTargets(True)
+            target_list = [str(t) for t in targets] if targets else []
+
+            # Strategy 1: Try to get embedded GLSL source from debugInfo.files
+            # This works for SPIR-V shaders with embedded GLSL debug info
+            # (e.g. DebugCompilationUnit / OpSource directives)
+            embedded_source = None
+            embedded_filename = None
+            try:
+                if reflection and reflection.debugInfo:
+                    debug_files = reflection.debugInfo.files
+                    if debug_files and len(debug_files) > 0:
+                        # The first file is typically the entry point source
+                        main_file = debug_files[0]
+                        if main_file.contents and main_file.contents.strip():
+                            embedded_source = main_file.contents
+                            embedded_filename = main_file.filename
+            except Exception:
+                pass  # debugInfo may not be available for all shader types
+
+            if embedded_source:
+                result["data"] = {
+                    "resource_id": str(shader),
+                    "entry_point": entry,
+                    "stage": stage,
+                    "selected_target": "debugInfo: %s" % (embedded_filename or "embedded"),
+                    "available_targets": target_list,
+                    "source": embedded_source,
+                }
+                return
+
+            # Strategy 2: Try disassembly targets (prefer GLSL over SPIR-V)
+            if not targets:
+                result["error"] = "No disassembly targets available and no embedded source found"
+                return
+
+            selected = None
+            if target_name:
+                # User specified a target
+                for t in targets:
+                    if str(t) == target_name:
+                        selected = t
+                        break
+                if selected is None:
+                    result["error"] = (
+                        "Target '%s' not found. Available: %s"
+                        % (target_name, ", ".join(target_list))
+                    )
+                    return
+            else:
+                # Auto-select: prefer GLSL source over SPIR-V disassembly
+                selected = targets[0]  # fallback
+                for t in targets:
+                    t_str = str(t).lower()
+                    if "glsl" in t_str or "source" in t_str:
+                        selected = t
+                        break
+
+            # Get the disassembly for the selected target
+            try:
+                source = controller.DisassembleShader(
+                    pipeline_obj, reflection, selected
+                )
+            except Exception as e:
+                result["error"] = "DisassembleShader failed for '%s': %s" % (selected, e)
+                return
+
+            result["data"] = {
+                "resource_id": str(shader),
+                "entry_point": entry,
+                "stage": stage,
+                "selected_target": str(selected),
+                "available_targets": target_list,
+                "source": source,
+            }
+
+        self._invoke(callback)
+
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["data"]
+
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         if not self.ctx.IsCaptureLoaded():
