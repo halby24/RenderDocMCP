@@ -132,6 +132,10 @@ class RenderDocFacade:
         """Get shader information for a specific stage"""
         return self._pipeline.get_shader_info(event_id, stage)
 
+    def export_shader_source(self, event_id, stage, target_name=None):
+        """Export shader source for offline compilation"""
+        return self._pipeline.export_shader_source(event_id, stage, target_name)
+
     def get_pipeline_state(self, event_id):
         """Get full pipeline state at an event"""
         return self._pipeline.get_pipeline_state(event_id)

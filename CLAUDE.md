@@ -23,6 +23,7 @@ RenderDocMCP/
 ├── mcp_server/                        # MCPサーバー
 │   ├── server.py                      # FastMCPエントリーポイント
 │   ├── config.py                      # 設定
+│   ├── shader_compiler.py             # モバイルGPUオフラインコンパイラ連携
 │   └── bridge/
 │       └── client.py                  # ファイルベースIPCクライアント
 │
@@ -32,6 +33,13 @@ RenderDocMCP/
 │   ├── socket_server.py               # ファイルベースIPCサーバー
 │   ├── request_handler.py             # リクエスト処理
 │   └── renderdoc_facade.py            # RenderDoc APIラッパー
+│
+├── mobile_offline_compilers/          # バンドル済みオフラインコンパイラ
+│   ├── malioc.exe                     # Mali Offline Compiler
+│   ├── aoc.exe                        # Adreno Offline Compiler
+│   └── graphics/                      # Mali GPU コアライブラリ
+│
+├── renderdoc_mcp_config.json          # コンパイラパス設定
 │
 └── scripts/
     └── install_extension.py           # 拡張機能インストール
@@ -56,6 +64,29 @@ RenderDocMCP/
 | `get_texture_info` | テクスチャメタデータ |
 | `get_texture_data` | テクスチャピクセルデータ取得（mip/slice/3Dスライス対応） |
 | `get_pipeline_state` | パイプライン状態全体 |
+| `analyze_shader_performance` | モバイルGPUオフラインコンパイラでシェーダー性能分析（Mali/Adreno） |
+
+### analyze_shader_performance（シェーダー性能分析）
+
+モバイルGPUオフラインコンパイラ（malioc / aoc）を使い、シェーダーの性能指標を取得する。
+GLSL ソースは SPIR-V の `debugInfo.files`（`ShaderReflection.debugInfo.files[0].contents`）から自動抽出される。
+
+```python
+analyze_shader_performance(
+    event_id=979,
+    stage="fragment",           # "vertex", "fragment"("pixel"), "compute"
+    compiler="both",            # "mali", "adreno", "both"
+    mali_core="Mali-G78",       # 省略時は設定デフォルト
+    adreno_arch="a650",         # 省略時は設定デフォルト
+)
+# Mali 結果: サイクル数（arithmetic/load_store/texture/varying）、
+#   ワーク/ユニフォームレジスタ数、スレッド占有率、FP16使用率、スタックスピル
+# Adreno 結果: 命令数（ALU 32/16bit, texture, memory, flow control）、
+#   レジスタ使用量（full/half precision）、ファイバー占有率
+```
+
+**設定ファイル**: `renderdoc_mcp_config.json` でコンパイラパスとデフォルトターゲットを指定可能。
+コンパイラバイナリ（`malioc.exe`, `aoc.exe`）は `mobile_offline_compilers/` にバンドル済み。
 
 ### get_draw_calls フィルタリングオプション
 

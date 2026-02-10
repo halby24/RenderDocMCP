@@ -9,6 +9,7 @@ from fastmcp import FastMCP
 
 from .bridge.client import RenderDocBridge, RenderDocBridgeError
 from .config import settings
+from .shader_compiler import ShaderPerformanceAnalyzer, ShaderCompilerError
 
 # Initialize FastMCP server
 mcp = FastMCP(
@@ -17,6 +18,22 @@ mcp = FastMCP(
 
 # RenderDoc bridge client
 bridge = RenderDocBridge(host=settings.renderdoc_host, port=settings.renderdoc_port)
+
+# Shader performance analyzer (lazy init to avoid startup errors if compilers missing)
+_analyzer: ShaderPerformanceAnalyzer | None = None
+
+
+def _get_analyzer() -> ShaderPerformanceAnalyzer:
+    """Get or create the shader performance analyzer."""
+    global _analyzer
+    if _analyzer is None:
+        _analyzer = ShaderPerformanceAnalyzer(
+            malioc_path=settings.malioc_path,
+            aoc_path=settings.aoc_path,
+            mali_default_core=settings.mali_default_core,
+            adreno_default_arch=settings.adreno_default_arch,
+        )
+    return _analyzer
 
 
 @mcp.tool
@@ -309,6 +326,119 @@ def open_capture(capture_path: str) -> dict:
     Note: This will close any currently open capture.
     """
     return bridge.call("open_capture", {"capture_path": capture_path})
+
+
+@mcp.tool
+def analyze_shader_performance(
+    event_id: int,
+    stage: Literal["vertex", "fragment", "pixel", "compute"],
+    compiler: Literal["mali", "adreno", "both"] = "both",
+    mali_core: str | None = None,
+    adreno_arch: str | None = None,
+) -> dict:
+    """
+    Analyze shader performance using mobile GPU offline compilers.
+
+    Compiles the shader from the specified draw call through Mali Offline Compiler
+    (malioc) and/or Adreno Offline Compiler (aoc), returning detailed performance
+    metrics including instruction counts, cycle counts, register usage, and
+    thread/fiber occupancy.
+
+    Only works with OpenGL ES (GLSL) captures. The shader source is extracted
+    from the loaded RenderDoc capture via disassembly or embedded debug info.
+
+    Args:
+        event_id: The event ID of the draw call to analyze
+        stage: Shader stage - "vertex", "fragment" (or "pixel"), "compute"
+        compiler: Which compiler to use - "mali", "adreno", or "both" (default)
+        mali_core: Mali GPU core target (e.g. "Mali-G78", "Mali-G720").
+                   Uses config default if not specified.
+        adreno_arch: Adreno architecture target (e.g. "a650", "a740").
+                     Uses config default if not specified.
+
+    Returns:
+        Performance analysis results from the requested compiler(s), including:
+        - Mali: cycle counts per pipeline (arithmetic, load/store, texture, varying),
+          work/uniform registers, thread occupancy, FP16 arithmetic %, stack spilling
+        - Adreno: instruction counts (ALU 32/16-bit, texture, memory, flow control),
+          register footprint (full/half precision), fiber occupancy
+    """
+    # Normalize stage name: bridge expects "pixel" not "fragment"
+    bridge_stage = "pixel" if stage in ("fragment", "pixel") else stage
+
+    source = None
+    resource_id = ""
+    entry_point = ""
+    selected_target = ""
+    available_targets = []
+
+    # Try to get shader source from capture, with fallback strategies
+    export_error = None
+
+    # Strategy 1: Try export_shader_source (auto-selects best target,
+    # also checks reflection.debugInfo.files for embedded GLSL)
+    try:
+        shader_data = bridge.call("export_shader_source", {"event_id": event_id, "stage": bridge_stage})
+        if shader_data and isinstance(shader_data, dict):
+            source = shader_data.get("source")
+            resource_id = shader_data.get("resource_id", "")
+            entry_point = shader_data.get("entry_point", "")
+            selected_target = shader_data.get("selected_target", "")
+            available_targets = shader_data.get("available_targets", [])
+    except Exception as e:
+        export_error = str(e)
+
+    # Strategy 2: Fallback to get_shader_info disassembly
+    if not source:
+        try:
+            shader_info = bridge.call("get_shader_info", {"event_id": event_id, "stage": bridge_stage})
+            if shader_info and isinstance(shader_info, dict):
+                source = shader_info.get("disassembly")
+                resource_id = shader_info.get("resource_id", "")
+                entry_point = shader_info.get("entry_point", "")
+                selected_target = "get_shader_info fallback"
+        except Exception as e:
+            raise ValueError(
+                f"Cannot get shader source for event {event_id} stage '{stage}': {e}"
+            )
+
+    # Validate it looks like GLSL (not SPIR-V disassembly)
+    if source and (source.strip().startswith("SPIR-V") or source.strip().startswith("; SPIR-V")):
+        raise ValueError(
+            f"The shader source is SPIR-V disassembly (target: '{selected_target}'), "
+            "which cannot be compiled by mobile offline compilers. "
+            f"Available targets: {available_targets}. "
+            "This tool requires compilable GLSL source code."
+        )
+
+    if not source:
+        diag = f"export_shader_source error: {export_error}" if export_error else "export_shader_source returned no source"
+        raise ValueError(
+            f"Cannot get shader source for event {event_id} stage '{stage}'. "
+            f"Diagnostics: {diag}. "
+            f"Available disassembly targets: {available_targets}. "
+            "This tool requires compilable GLSL source code "
+            "(typically available in OpenGL ES captures with debug info)."
+        )
+
+    # Run offline compiler analysis
+    analyzer = _get_analyzer()
+    result = analyzer.analyze(
+        shader_source=source,
+        stage=stage,
+        compiler=compiler,
+        mali_core=mali_core,
+        adreno_arch=adreno_arch,
+    )
+
+    # Add context info
+    result["event_id"] = event_id
+    result["shader_resource_id"] = resource_id
+    result["entry_point"] = entry_point
+    result["disassembly_target"] = selected_target
+    result["available_targets"] = available_targets
+
+    return result
 
 
 def main():
