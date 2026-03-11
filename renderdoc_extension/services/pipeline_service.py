@@ -115,48 +115,50 @@ class PipelineService:
 
             pipeline_info["shaders"] = stages
 
-            # Viewport and scissor
+            # Viewport and scissor (using Common Pipeline State Abstraction)
             try:
-                vp_scissor = pipe.GetViewportScissor()
-                if vp_scissor:
-                    viewports = []
-                    for v in vp_scissor.viewports:
-                        viewports.append(
-                            {
-                                "x": v.x,
-                                "y": v.y,
-                                "width": v.width,
-                                "height": v.height,
-                                "min_depth": v.minDepth,
-                                "max_depth": v.maxDepth,
-                            }
-                        )
-                    pipeline_info["viewports"] = viewports
-            except Exception:
-                pass
+                viewports = []
+                for i in range(16):
+                    try:
+                        vp = pipe.GetViewport(i)
+                        if vp.width > 0:
+                            viewports.append(
+                                {
+                                    "x": vp.x,
+                                    "y": vp.y,
+                                    "width": vp.width,
+                                    "height": vp.height,
+                                    "min_depth": vp.minDepth,
+                                    "max_depth": vp.maxDepth,
+                                }
+                            )
+                    except (IndexError, RuntimeError):
+                        break
+                pipeline_info["viewports"] = viewports
+            except Exception as e:
+                pipeline_info["viewports_error"] = str(e)
 
-            # Render targets
+            # Render targets (using Common Pipeline State Abstraction)
             try:
-                om = pipe.GetOutputMerger()
-                if om:
-                    rts = []
-                    for i, rt in enumerate(om.renderTargets):
-                        if rt.resourceId != rd.ResourceId.Null():
-                            rts.append({"index": i, "resource_id": str(rt.resourceId)})
-                    pipeline_info["render_targets"] = rts
+                rts = []
+                output_targets = pipe.GetOutputTargets()
+                for i, rt in enumerate(output_targets):
+                    if rt.resource != rd.ResourceId.Null():
+                        rts.append({"index": i, "resource_id": str(rt.resource)})
+                pipeline_info["render_targets"] = rts
 
-                    if om.depthTarget.resourceId != rd.ResourceId.Null():
-                        pipeline_info["depth_target"] = str(om.depthTarget.resourceId)
-            except Exception:
-                pass
+                depth = pipe.GetDepthTarget()
+                if depth.resource != rd.ResourceId.Null():
+                    pipeline_info["depth_target"] = str(depth.resource)
+            except Exception as e:
+                pipeline_info["render_targets_error"] = str(e)
 
-            # Input assembly
+            # Input assembly (using Common Pipeline State Abstraction)
             try:
-                ia = pipe.GetIAState()
-                if ia:
-                    pipeline_info["input_assembly"] = {"topology": str(ia.topology)}
-            except Exception:
-                pass
+                topo = pipe.GetPrimitiveTopology()
+                pipeline_info["input_assembly"] = {"topology": str(topo)}
+            except Exception as e:
+                pipeline_info["input_assembly_error"] = str(e)
 
             result["pipeline"] = pipeline_info
 
